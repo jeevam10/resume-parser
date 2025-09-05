@@ -14,16 +14,21 @@ import mammoth
 import langchain
 from langchain.text_splitter import CharacterTextSplitter
 
-# Use chunk_size suitable for a longer LLM token limit (Qwen ~4k tokens)
-text_splitter = CharacterTextSplitter(chunk_size=900, chunk_overlap=120)
+# OpenAI integration
+import openai
+from openai import OpenAI
 
-from transformers import pipeline
 from sentence_transformers import SentenceTransformer, util
 
 from pymongo import MongoClient
-from datetime import datetime  # used for created_at later
 
+# Use chunk_size suitable for a longer LLM token limit (OpenAI models ~4k tokens)
+text_splitter = CharacterTextSplitter(chunk_size=900, chunk_overlap=120)
 MONGO_URI = "mongodb+srv://philosopher211004:KlphBlH6x1Ixdjj1@cluster0.uvkdgmg.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
+
+# Initialize OpenAI client
+OPENAI_API_KEY = "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"
+openai_client = OpenAI(api_key=OPENAI_API_KEY)
 
 client = MongoClient(MONGO_URI)
 db = client["resume_parser_db"]  # You can name this anything
@@ -32,7 +37,6 @@ graphs_collection = db["graphs_llm"]
 
 
 # Collection to store parsed resume results
-
 
 class DocumentToJSONConverter:
     def __init__(self):
@@ -445,13 +449,12 @@ def clean_resume_text(text: str) -> str:
     unique_lines = list(dict.fromkeys(lines))
     unique_text = "\n".join(unique_lines).strip()
     return unique_text
-    # Trim to stay within model limit
 
 
-import json
-
-
-def parse_with_llm(text: str, pipe_model) -> str:
+def parse_with_openai(text: str) -> str:
+    """
+    Parse resume text using OpenAI API instead of local LLM
+    """
     prompt_header = (
         "You are an information extractor. Extract ONLY from the provided resume text. "
         "If a field is not explicitly present, output None. Do NOT invent or guess values.\n"
@@ -468,14 +471,31 @@ def parse_with_llm(text: str, pipe_model) -> str:
         "- projects: List project names or brief descriptions. Separate with semicolons.\n\n"
         "Resume:\n"
     )
-    prompt = prompt_header + f'"""\n{text}\n"""'
-    result = pipe_model(prompt, max_new_tokens=250, truncation=True, do_sample=False, num_beams=1,
-                        return_full_text=False)
-    return result[0]['generated_text']
+
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",  # You can also use "gpt-4" for better quality but higher cost
+            messages=[
+                {"role": "system",
+                 "content": "You are an expert resume parser that extracts information accurately from resume text."},
+                {"role": "user", "content": prompt_header + f'"""\n{text}\n"""'}
+            ],
+            max_tokens=300,
+            temperature=0,  # Set to 0 for consistent outputs
+            top_p=1,
+            frequency_penalty=0,
+            presence_penalty=0
+        )
+
+        return response.choices[0].message.content.strip()
+
+    except Exception as e:
+        print(f"Error calling OpenAI API: {e}")
+        return ""
 
 
-def parse_with_llm_strict(text: str, pipe_model) -> str:
-    """Retry prompt with stronger constraints and better formatting."""
+def parse_with_openai_strict(text: str) -> str:
+    """Retry prompt with stronger constraints and better formatting using OpenAI API."""
     prompt_header = (
         "Extract ONLY from the resume text below. Never guess or invent. If a field is missing, write None.\n"
         "Return EXACTLY these 8 lines, one per field, format '- <field> is <value>':\n"
@@ -485,10 +505,27 @@ def parse_with_llm_strict(text: str, pipe_model) -> str:
         "Look carefully for contact information and work experience details.\n\n"
         "Resume:\n"
     )
-    prompt = prompt_header + f'"""\n{text}\n"""'
-    result = pipe_model(prompt, max_new_tokens=250, truncation=True, do_sample=False, num_beams=1,
-                        return_full_text=False)
-    return result[0]['generated_text']
+
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system",
+                 "content": "You are an expert resume parser. Extract information strictly from the provided text without making assumptions."},
+                {"role": "user", "content": prompt_header + f'"""\n{text}\n"""'}
+            ],
+            max_tokens=300,
+            temperature=0,
+            top_p=1,
+            frequency_penalty=0,
+            presence_penalty=0
+        )
+
+        return response.choices[0].message.content.strip()
+
+    except Exception as e:
+        print(f"Error calling OpenAI API (strict): {e}")
+        return ""
 
 
 def fallback_extract_basic_fields(text: str, current: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
@@ -519,7 +556,18 @@ def fallback_extract_basic_fields(text: str, current: Dict[str, Optional[str]]) 
                 if re.fullmatch(r"[A-Za-z][A-Za-z\-']+(?:\s+[A-Za-z][A-Za-z\-']+){1,3}", ln):
                     # Avoid job titles, company names, and section headers
                     lower_ln = ln.lower()
-                    if not any(word in lower_ln for word in ['engineer', 'developer', 'manager', 'director', 'consultant', 'analyst', 'specialist', 'coordinator', 'assistant', 'officer', 'executive', 'president', 'ceo', 'cto', 'cfo', 'vp', 'head', 'lead', 'senior', 'junior', 'principal', 'staff', 'associate', 'intern', 'trainee', 'apprentice', 'student', 'graduate', 'undergraduate', 'phd', 'masters', 'bachelor', 'diploma', 'certificate', 'degree', 'university', 'college', 'institute', 'school', 'academy', 'corporation', 'company', 'inc', 'ltd', 'llc', 'corp', 'enterprise', 'solutions', 'technologies', 'systems', 'services', 'group', 'team', 'department', 'division', 'unit', 'section', 'branch', 'office', 'location', 'address', 'contact', 'phone', 'email', 'website', 'linkedin', 'github', 'portfolio', 'resume', 'cv', 'profile', 'summary', 'objective', 'experience', 'education', 'skills', 'projects', 'certifications', 'awards', 'publications', 'patents', 'references']):
+                    if not any(word in lower_ln for word in
+                               ['engineer', 'developer', 'manager', 'director', 'consultant', 'analyst', 'specialist',
+                                'coordinator', 'assistant', 'officer', 'executive', 'president', 'ceo', 'cto', 'cfo',
+                                'vp', 'head', 'lead', 'senior', 'junior', 'principal', 'staff', 'associate', 'intern',
+                                'trainee', 'apprentice', 'student', 'graduate', 'undergraduate', 'phd', 'masters',
+                                'bachelor', 'diploma', 'certificate', 'degree', 'university', 'college', 'institute',
+                                'school', 'academy', 'corporation', 'company', 'inc', 'ltd', 'llc', 'corp',
+                                'enterprise', 'solutions', 'technologies', 'systems', 'services', 'group', 'team',
+                                'department', 'division', 'unit', 'section', 'branch', 'office', 'location', 'address',
+                                'contact', 'phone', 'email', 'website', 'linkedin', 'github', 'portfolio', 'resume',
+                                'cv', 'profile', 'summary', 'objective', 'experience', 'education', 'skills',
+                                'projects', 'certifications', 'awards', 'publications', 'patents', 'references']):
                         name_found = ln
                         break
             # Heuristic 2: derive from email local-part if available
@@ -588,7 +636,8 @@ def fallback_extract_from_sections(raw_text: str, current: Dict[str, Optional[st
             cleaned_edu = []
             for line in edu_lines[:10]:
                 # Remove common section headers
-                line = re.sub(r'^(EDUCATION|Education|ACADEMIC|Academic|QUALIFICATIONS|Qualifications)\s*:?\s*', '', line, flags=re.IGNORECASE)
+                line = re.sub(r'^(EDUCATION|Education|ACADEMIC|Academic|QUALIFICATIONS|Qualifications)\s*:?\s*', '',
+                              line, flags=re.IGNORECASE)
                 if line.strip() and len(line.strip()) > 3:
                     cleaned_edu.append(line.strip())
             if cleaned_edu:
@@ -643,8 +692,6 @@ def fallback_extract_from_sections(raw_text: str, current: Dict[str, Optional[st
         years = []
         # Look for various patterns of years of experience
         patterns = [
-            r"(\d+(?:\.\d+)?)\s*(?:\+\s*)?(?:years?|yrs?)\s*(?:of\s+)?(?:experience|exp)",
-            r"(?:experience|exp)\s*(?:of\s+)?(\d+(?:\.\d+)?)\s*(?:\+\s*)?(?:years?|yrs?)",
             r"(\d+(?:\.\d+)?)\s*(?:\+\s*)?(?:years?|yrs?)\s*(?:in\s+)?(?:the\s+)?(?:field|industry|domain)",
             r"(\d+)\s*(?:\+\s*)?(?:years?|yrs?)"
         ]
@@ -777,9 +824,9 @@ def merge_llm_dicts(dict_list: List[Dict[str, Optional[str]]]) -> Dict[str, Opti
     return merged
 
 
-def chunk_and_parse_with_llm(full_text: str, pipe_model) -> (Dict[str, Optional[str]], str, List[Dict[str, str]]):
+def chunk_and_parse_with_openai(full_text: str) -> (Dict[str, Optional[str]], str, List[Dict[str, str]]):
     """
-    Split resume text into chunks, run the LLM per chunk, parse each output, and merge results.
+    Split resume text into chunks, run OpenAI per chunk, parse each output, and merge results.
     Returns (merged_dict, combined_plain_text_output, debug_info).
     """
     # Auto-bypass chunking when text is short enough (approx <= 3k chars ~ 1k tokens)
@@ -792,14 +839,14 @@ def chunk_and_parse_with_llm(full_text: str, pipe_model) -> (Dict[str, Optional[
     debug_info: List[Dict[str, str]] = []
 
     for idx, chunk in enumerate(chunks):
-        out = parse_with_llm(chunk, pipe_model)
+        out = parse_with_openai(chunk)
         try:
             parsed = parse_plain_llm_output(out)
         except Exception:
             parsed = {}
         # Retry if no ' is ' lines parsed
         if not parsed or all(v is None for v in parsed.values()):
-            out_retry = parse_with_llm_strict(chunk, pipe_model)
+            out_retry = parse_with_openai_strict(chunk)
             try:
                 parsed_retry = parse_plain_llm_output(out_retry)
             except Exception:
@@ -812,9 +859,9 @@ def chunk_and_parse_with_llm(full_text: str, pipe_model) -> (Dict[str, Optional[
         parsed_dicts.append(parsed)
 
         prompt_preview = (chunk[:300] + "...") if len(chunk) > 300 else chunk
-        print(f"\n[LLM CHUNK {idx + 1}/{len(chunks)}] Input preview:\n{prompt_preview}")
-        print(f"[LLM CHUNK {idx + 1}] Output:\n{out}")
-        print(f"[LLM CHUNK {idx + 1}] Parsed dict: {parsed}")
+        print(f"\n[OpenAI  {idx + 1}/{len(chunks)}] Input preview:\n{prompt_preview}")
+        print(f"[OpenAI  {idx + 1}] Output:\n{out}")
+        print(f"[OpenAI  {idx + 1}] Parsed dict: {parsed}")
         debug_info.append({
             "chunk_index": str(idx),
             "chunk_text": chunk[:1200],
@@ -826,13 +873,6 @@ def chunk_and_parse_with_llm(full_text: str, pipe_model) -> (Dict[str, Optional[
     combined_text_lines = [f"- {k} is {v}" for k, v in merged.items() if v is not None]
     combined_text = "\n".join(combined_text_lines)
     return merged, combined_text, debug_info
-
-
-from collections import defaultdict
-from datetime import datetime
-
-from collections import defaultdict
-from datetime import datetime
 
 
 def build_and_store_scores(scores_list, db):
@@ -915,8 +955,9 @@ def calculate_semantic_similarity(resume_text: str, job_description: str, model)
         print(f"Error calculating semantic similarity: {e}")
         return 0.0
 
-def enhanced_parse_with_llm(text: str, pipe_model) -> str:
-    """Enhanced LLM parsing with better prompts for improved accuracy."""
+
+def enhanced_parse_with_openai(text: str) -> str:
+    """Enhanced OpenAI parsing with better prompts for improved accuracy."""
     prompt_header = (
         "You are an expert resume parser. Extract ONLY from the provided resume text. "
         "If a field is not explicitly present, output None. Do NOT invent or guess values.\n"
@@ -933,10 +974,28 @@ def enhanced_parse_with_llm(text: str, pipe_model) -> str:
         "- projects: List project names or brief descriptions. Separate with semicolons.\n\n"
         "Resume:\n"
     )
-    prompt = prompt_header + f'"""\n{text}\n"""'
-    result = pipe_model(prompt, max_new_tokens=300, truncation=True, do_sample=False, num_beams=1,
-                        return_full_text=False)
-    return result[0]['generated_text']
+
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system",
+                 "content": "You are an expert resume parser that extracts information accurately from resume text."},
+                {"role": "user", "content": prompt_header + f'"""\n{text}\n"""'}
+            ],
+            max_tokens=350,
+            temperature=0,
+            top_p=1,
+            frequency_penalty=0,
+            presence_penalty=0
+        )
+
+        return response.choices[0].message.content.strip()
+
+    except Exception as e:
+        print(f"Error calling OpenAI API (enhanced): {e}")
+        return ""
+
 
 def enhanced_fallback_extract_basic_fields(text: str, current: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
     """Enhanced fallback extraction with better name detection."""
@@ -964,7 +1023,10 @@ def enhanced_fallback_extract_basic_fields(text: str, current: Dict[str, Optiona
                 if re.fullmatch(r"[A-Za-z][A-Za-z\-']+(?:\s+[A-Za-z][A-Za-z\-']+){1,3}", ln):
                     lower_ln = ln.lower()
                     # Enhanced filtering for job titles and company names
-                    if not any(word in lower_ln for word in ['engineer', 'developer', 'manager', 'director', 'consultant', 'analyst', 'specialist', 'coordinator', 'assistant', 'officer', 'executive', 'president', 'ceo', 'cto', 'cfo', 'vp', 'head', 'lead', 'senior', 'junior', 'principal', 'staff', 'associate', 'intern', 'trainee', 'apprentice', 'student', 'graduate', 'undergraduate', 'phd', 'masters', 'bachelor', 'diploma', 'certificate', 'degree', 'university', 'college', 'institute', 'school', 'academy', 'corporation', 'company', 'inc', 'ltd', 'llc', 'corp', 'enterprise', 'solutions', 'technologies', 'systems', 'services', 'group', 'team', 'department', 'division', 'unit', 'section', 'branch', 'office', 'location', 'address', 'contact', 'phone', 'email', 'website', 'linkedin', 'github', 'portfolio', 'resume', 'cv', 'profile', 'summary', 'objective', 'experience', 'education', 'skills', 'projects', 'certifications', 'awards', 'publications', 'patents', 'references', 'data', 'software', 'hardware', 'network', 'cloud', 'database', 'web', 'mobile', 'desktop', 'application', 'system', 'platform', 'framework', 'library', 'api', 'sdk', 'tool', 'technology', 'methodology', 'process', 'procedure', 'protocol', 'standard', 'guideline', 'best practice', 'workflow', 'pipeline', 'automation', 'integration', 'deployment', 'maintenance', 'support', 'testing', 'quality', 'security', 'performance', 'scalability', 'reliability', 'availability', 'backup', 'recovery', 'monitoring', 'logging', 'analytics', 'reporting', 'dashboard', 'visualization', 'machine learning', 'artificial intelligence', 'data science', 'statistics', 'mathematics', 'algorithm', 'model', 'prediction', 'classification', 'regression', 'clustering', 'optimization', 'simulation', 'research', 'development', 'design', 'architecture', 'implementation', 'coding', 'programming', 'scripting', 'debugging', 'troubleshooting', 'documentation', 'training', 'mentoring', 'coaching', 'leadership', 'management', 'planning', 'strategy', 'analysis', 'evaluation', 'assessment', 'review', 'audit', 'compliance', 'governance', 'risk', 'security', 'privacy', 'data protection', 'gdpr', 'sox', 'hipaa', 'pci', 'iso', 'nist', 'cobit', 'itil', 'togaf', 'agile', 'scrum', 'kanban', 'waterfall', 'devops', 'ci/cd', 'continuous', 'integration', 'deployment', 'delivery', 'automation', 'orchestration', 'containerization', 'virtualization', 'microservices', 'monolith', 'distributed', 'centralized', 'cloud', 'on-premise', 'hybrid', 'multi-cloud', 'public', 'private', 'community', 'sovereign', 'government', 'enterprise', 'smb', 'startup', 'scale-up', 'unicorn', 'decacorn', 'hectocorn', 'ipo', 'm&a', 'acquisition', 'merger', 'divestiture', 'spin-off', 'carve-out', 'joint venture', 'partnership', 'alliance', 'consortium', 'cooperative', 'non-profit', 'foundation', 'charity', 'ngo', 'igo', 'io', 'un', 'wto', 'imf', 'world bank', 'eu', 'nato', 'asean', 'brics', 'g7', 'g20', 'oecd', 'opec', 'iea', 'iaea', 'who', 'unesco', 'unicef', 'unhcr', 'wfp', 'fao', 'ilo', 'imo', 'icao', 'itu', 'upu', 'wipo', 'wmo', 'unep', 'unfccc', 'cbd', 'cites', 'ramsar', 'world heritage']):
+                    if not any(word in lower_ln for word in
+                               ['engineer', 'developer', 'manager', 'director', 'consultant', 'analyst', 'specialist',
+                                'coordinator', 'assistant', 'officer', 'executive', 'president', 'ceo', 'cto', 'cfo',
+                                'vp', 'head', 'lead', 'senior', 'junior', 'principal', 'staff', 'associate', 'intern']):
                         name_found = ln
                         break
             # Enhanced email-based name extraction
@@ -981,7 +1043,9 @@ def enhanced_fallback_extract_basic_fields(text: str, current: Dict[str, Optiona
         pass
     return updated
 
-def enhanced_fallback_extract_from_sections(raw_text: str, current: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
+
+def enhanced_fallback_extract_from_sections(raw_text: str, current: Dict[str, Optional[str]]) -> Dict[
+    str, Optional[str]]:
     """Enhanced section-based extraction with better cleaning."""
     updated = dict(current)
     sections = _parse_sections_from_text(raw_text)
@@ -1010,7 +1074,9 @@ def enhanced_fallback_extract_from_sections(raw_text: str, current: Dict[str, Op
         if edu_lines:
             cleaned_edu = []
             for line in edu_lines[:10]:
-                line = re.sub(r'^(EDUCATION|Education|ACADEMIC|Academic|QUALIFICATIONS|Qualifications|CERTIFICATES|Certificates)\s*:?\s*', '', line, flags=re.IGNORECASE)
+                line = re.sub(
+                    r'^(EDUCATION|Education|ACADEMIC|Academic|QUALIFICATIONS|Qualifications|CERTIFICATES|Certificates)\s*:?\s*',
+                    '', line, flags=re.IGNORECASE)
                 if line.strip() and len(line.strip()) > 3:
                     cleaned_edu.append(line.strip())
             if cleaned_edu:
@@ -1075,8 +1141,9 @@ def enhanced_fallback_extract_from_sections(raw_text: str, current: Dict[str, Op
 
     return updated
 
-def enhanced_parse_with_llm_strict(text: str, pipe_model) -> str:
-    """Enhanced strict LLM parsing with stronger constraints."""
+
+def enhanced_parse_with_openai_strict(text: str) -> str:
+    """Enhanced strict OpenAI parsing with stronger constraints."""
     prompt_header = (
         "Extract ONLY from the resume text below. Never guess or invent. If a field is missing, write None.\n"
         "Return EXACTLY these 8 lines, one per field, format '- <field> is <value>':\n"
@@ -1086,14 +1153,32 @@ def enhanced_parse_with_llm_strict(text: str, pipe_model) -> str:
         "Look carefully for contact information and work experience details.\n\n"
         "Resume:\n"
     )
-    prompt = prompt_header + f'"""\n{text}\n"""'
-    result = pipe_model(prompt, max_new_tokens=300, truncation=True, do_sample=False, num_beams=1,
-                        return_full_text=False)
-    return result[0]['generated_text']
 
-def enhanced_chunk_and_parse_with_llm(full_text: str, pipe_model) -> (Dict[str, Optional[str]], str, List[Dict[str, str]]):
+    try:
+        response = openai_client.chat.completions.create(
+            model="gpt-3.5-turbo",
+            messages=[
+                {"role": "system",
+                 "content": "You are an expert resume parser. Extract information strictly from the provided text without making assumptions."},
+                {"role": "user", "content": prompt_header + f'"""\n{text}\n"""'}
+            ],
+            max_tokens=350,
+            temperature=0,
+            top_p=1,
+            frequency_penalty=0,
+            presence_penalty=0
+        )
+
+        return response.choices[0].message.content.strip()
+
+    except Exception as e:
+        print(f"Error calling OpenAI API (enhanced strict): {e}")
+        return ""
+
+
+def enhanced_chunk_and_parse_with_openai(full_text: str) -> (Dict[str, Optional[str]], str, List[Dict[str, str]]):
     """
-    Enhanced chunking and parsing with better LLM prompts.
+    Enhanced chunking and parsing with better OpenAI prompts.
     Returns (merged_dict, combined_plain_text_output, debug_info).
     """
     # Auto-bypass chunking when text is short enough (approx <= 3k chars ~ 1k tokens)
@@ -1106,14 +1191,14 @@ def enhanced_chunk_and_parse_with_llm(full_text: str, pipe_model) -> (Dict[str, 
     debug_info: List[Dict[str, str]] = []
 
     for idx, chunk in enumerate(chunks):
-        out = enhanced_parse_with_llm(chunk, pipe_model)
+        out = enhanced_parse_with_openai(chunk)
         try:
             parsed = parse_plain_llm_output(out)
         except Exception:
             parsed = {}
         # Retry if no ' is ' lines parsed
         if not parsed or all(v is None for v in parsed.values()):
-            out_retry = enhanced_parse_with_llm_strict(chunk, pipe_model)
+            out_retry = enhanced_parse_with_openai_strict(chunk)
             try:
                 parsed_retry = parse_plain_llm_output(out_retry)
             except Exception:
@@ -1126,9 +1211,9 @@ def enhanced_chunk_and_parse_with_llm(full_text: str, pipe_model) -> (Dict[str, 
         parsed_dicts.append(parsed)
 
         prompt_preview = (chunk[:300] + "...") if len(chunk) > 300 else chunk
-        print(f"\n[ENHANCED LLM CHUNK {idx + 1}/{len(chunks)}] Input preview:\n{prompt_preview}")
-        print(f"[ENHANCED LLM CHUNK {idx + 1}] Output:\n{out}")
-        print(f"[ENHANCED LLM CHUNK {idx + 1}] Parsed dict: {parsed}")
+        print(f"\n[ENHANCED OpenAI CHUNK {idx + 1}/{len(chunks)}] Input preview:\n{prompt_preview}")
+        print(f"[ENHANCED OpenAI CHUNK {idx + 1}] Output:\n{out}")
+        print(f"[ENHANCED OpenAI CHUNK {idx + 1}] Parsed dict: {parsed}")
         debug_info.append({
             "chunk_index": str(idx),
             "chunk_text": chunk[:1200],
@@ -1141,180 +1226,23 @@ def enhanced_chunk_and_parse_with_llm(full_text: str, pipe_model) -> (Dict[str, 
     combined_text = "\n".join(combined_text_lines)
     return merged, combined_text, debug_info
 
-def use_enhanced_parsing(cleaned_text: str, pipe_model, raw_text: str) -> (Dict[str, Optional[str]], str, List[Dict[str, str]]):
+
+def use_enhanced_parsing_with_openai(cleaned_text: str, raw_text: str) -> (
+Dict[str, Optional[str]], str, List[Dict[str, str]]):
     """
-    Use enhanced parsing functions for better accuracy.
+    Use enhanced parsing functions with OpenAI for better accuracy.
     This function can be called instead of the original chunk_and_parse_with_llm.
     """
-    # Use enhanced LLM parsing
-    merged_fields, llm_output_str, llm_debug = enhanced_chunk_and_parse_with_llm(cleaned_text, pipe_model)
-    
+    # Use enhanced OpenAI parsing
+    merged_fields, llm_output_str, llm_debug = enhanced_chunk_and_parse_with_openai(cleaned_text)
+
     # Use enhanced fallback extraction
     merged_fields = enhanced_fallback_extract_basic_fields(cleaned_text, merged_fields)
     merged_fields = enhanced_fallback_extract_from_sections(raw_text, merged_fields)
     merged_fields = enforce_source_consistency(raw_text, merged_fields)
-    
+
     return merged_fields, llm_output_str, llm_debug
 
-def fix_company_extraction(raw_text: str, current: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
-    """Fix company extraction issues - separate companies from education institutions."""
-    updated = dict(current)
-    
-    if not updated.get("previous_companies"):
-        # Look for company patterns in the entire text
-        companies = []
-        
-        # Pattern 1: Look for "at Company Name" or "with Company Name"
-        company_patterns = [
-            r'(?:at|with|for)\s+([A-Z][A-Za-z0-9&\'\.\- ]{3,}(?:\s+[A-Za-z0-9&\'\.\- ]{2,})*)',
-            r'([A-Z][A-Za-z0-9&\'\.\- ]{3,}(?:\s+[A-Za-z0-9&\'\.\- ]{2,})*)\s+(?:Inc\.|Inc|LLC|Ltd\.|Ltd|Technologies|Solutions|Labs|Corp\.|Corp|Pvt\.|Pvt|Limited|Company|Co\.|Co|Software|Systems|Services)',
-            r'(?:worked\s+at|employed\s+at|experience\s+at)\s+([A-Z][A-Za-z0-9&\'\.\- ]{3,}(?:\s+[A-Za-z0-9&\'\.\- ]{2,})*)',
-            r'([A-Z][A-Za-z0-9&\'\.\- ]{3,}(?:\s+[A-Za-z0-9&\'\.\- ]{2,})*)\s+(?:as|position|role|job)'
-        ]
-        
-        for pattern in company_patterns:
-            matches = re.findall(pattern, raw_text, re.IGNORECASE)
-            for match in matches:
-                company = match.strip()
-                # Filter out education institutions
-                if not any(word in company.lower() for word in ['university', 'college', 'institute', 'school', 'academy', 'vishwakarma', 'mangalore']):
-                    companies.append(company)
-        
-        # Remove duplicates and filter
-        seen = set()
-        unique_companies = []
-        for company in companies:
-            key = company.lower()
-            if key not in seen and len(company) > 3:
-                seen.add(key)
-                unique_companies.append(company)
-        
-        if unique_companies:
-            updated["previous_companies"] = "; ".join(unique_companies[:10])
-    
-    return updated
-
-def fix_education_extraction(raw_text: str, current: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
-    """Fix education extraction - separate education from companies."""
-    updated = dict(current)
-    
-    if not updated.get("education"):
-        education_entries = []
-        
-        # Look for education patterns
-        edu_patterns = [
-            r'(?:Bachelor|Master|PhD|B\.Tech|M\.Tech|B\.E|M\.E|B\.Sc|M\.Sc|MBA|PGDM|Diploma|Certificate)\s+(?:of|in|from)?\s*[A-Za-z\s&]+(?:from|at)?\s*([A-Z][A-Za-z\s&\.]+)',
-            r'([A-Z][A-Za-z\s&\.]+)\s+(?:University|College|Institute|School|Academy)',
-            r'(?:studied|graduated|completed|pursued)\s+(?:at|from)\s+([A-Z][A-Za-z\s&\.]+)',
-            r'([A-Z][A-Za-z\s&\.]+)\s+(?:199\d|200\d|201\d|202\d)'
-        ]
-        
-        for pattern in edu_patterns:
-            matches = re.findall(pattern, raw_text, re.IGNORECASE)
-            for match in matches:
-                institution = match.strip()
-                if any(word in institution.lower() for word in ['university', 'college', 'institute', 'school', 'academy', 'vishwakarma', 'mangalore']):
-                    education_entries.append(institution)
-        
-        # Remove duplicates
-        seen = set()
-        unique_edu = []
-        for edu in education_entries:
-            key = edu.lower()
-            if key not in seen and len(edu) > 3:
-                seen.add(key)
-                unique_edu.append(edu)
-        
-        if unique_edu:
-            updated["education"] = "; ".join(unique_edu[:5])
-    
-    return updated
-
-def fix_project_extraction(raw_text: str, current: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
-    """Fix project extraction - look for project patterns in text."""
-    updated = dict(current)
-    
-    if not updated.get("projects"):
-        projects = []
-        
-        # Look for project patterns
-        project_patterns = [
-            r'(?:Project|Developed|Built|Created|Implemented|Designed)\s+(?:an?|the)?\s+([A-Z][A-Za-z0-9\s&\.\-]+(?:System|Application|Platform|Tool|Framework|Solution|Model|Algorithm|Dashboard|Website|App|Software|Program|Script|API|Service|Database|Network|Security|Analytics|Machine Learning|AI|Data Science|Automation|Integration|Deployment|Monitoring|Testing|Quality|Performance|Scalability|Reliability|Availability|Backup|Recovery|Backup|Recovery|Monitoring|Logging|Analytics|Reporting|Visualization|Prediction|Classification|Regression|Clustering|Optimization|Simulation|Research|Development|Design|Architecture|Implementation|Coding|Programming|Scripting|Debugging|Troubleshooting|Documentation|Training|Mentoring|Coaching|Leadership|Management|Planning|Strategy|Analysis|Evaluation|Assessment|Review|Audit|Compliance|Governance|Risk|Security|Privacy|Data Protection|GDPR|SOX|HIPAA|PCI|ISO|NIST|COBIT|ITIL|TOGAF|Agile|Scrum|Kanban|Waterfall|DevOps|CI/CD|Continuous|Integration|Deployment|Delivery|Automation|Orchestration|Containerization|Virtualization|Microservices|Monolith|Distributed|Centralized|Cloud|On-premise|Hybrid|Multi-cloud|Public|Private|Community|Sovereign|Government|Enterprise|SMB|Startup|Scale-up|Unicorn|Decacorn|Hectocorn|IPO|M&A|Acquisition|Merger|Divestiture|Spin-off|Carve-out|Joint Venture|Partnership|Alliance|Consortium|Cooperative|Non-profit|Foundation|Charity|NGO|IGO|IO|UN|WTO|IMF|World Bank|EU|NATO|ASEAN|BRICS|G7|G20|OECD|OPEC|IEA|IAEA|WHO|UNESCO|UNICEF|UNHCR|WFP|FAO|ILO|IMO|ICAO|ITU|UPU|WIPO|WMO|UNEP|UNFCCC|CBD|CITES|Ramsar|World Heritage))',
-            r'([A-Z][A-Za-z0-9\s&\.\-]+(?:System|Application|Platform|Tool|Framework|Solution|Model|Algorithm|Dashboard|Website|App|Software|Program|Script|API|Service|Database|Network|Security|Analytics|Machine Learning|AI|Data Science|Automation|Integration|Deployment|Monitoring|Testing|Quality|Performance|Scalability|Reliability|Availability|Backup|Recovery|Backup|Recovery|Monitoring|Logging|Analytics|Reporting|Visualization|Prediction|Classification|Regression|Clustering|Optimization|Simulation|Research|Development|Design|Architecture|Implementation|Coding|Programming|Scripting|Debugging|Troubleshooting|Documentation|Training|Mentoring|Coaching|Leadership|Management|Planning|Strategy|Analysis|Evaluation|Assessment|Review|Audit|Compliance|Governance|Risk|Security|Privacy|Data Protection|GDPR|SOX|HIPAA|PCI|ISO|NIST|COBIT|ITIL|TOGAF|Agile|Scrum|Kanban|Waterfall|DevOps|CI/CD|Continuous|Integration|Deployment|Delivery|Automation|Orchestration|Containerization|Virtualization|Microservices|Monolith|Distributed|Centralized|Cloud|On-premise|Hybrid|Multi-cloud|Public|Private|Community|Sovereign|Government|Enterprise|SMB|Startup|Scale-up|Unicorn|Decacorn|Hectocorn|IPO|M&A|Acquisition|Merger|Divestiture|Spin-off|Carve-out|Joint Venture|Partnership|Alliance|Consortium|Cooperative|Non-profit|Foundation|Charity|NGO|IGO|IO|UN|WTO|IMF|World Bank|EU|NATO|ASEAN|BRICS|G7|G20|OECD|OPEC|IEA|IAEA|WHO|UNESCO|UNICEF|UNHCR|WFP|FAO|ILO|IMO|ICAO|ITU|UPU|WIPO|WMO|UNEP|UNFCCC|CBD|CITES|Ramsar|World Heritage))',
-            r'(?:worked\s+on|developed|built|created|implemented|designed)\s+([A-Z][A-Za-z0-9\s&\.\-]+)',
-            r'([A-Z][A-Za-z0-9\s&\.\-]+)\s+(?:project|system|application|platform|tool|framework|solution|model|algorithm|dashboard|website|app|software|program|script|api|service|database|network|security|analytics|machine learning|ai|data science|automation|integration|deployment|monitoring|testing|quality|performance|scalability|reliability|availability|backup|recovery|backup|recovery|monitoring|logging|analytics|reporting|visualization|prediction|classification|regression|clustering|optimization|simulation|research|development|design|architecture|implementation|coding|programming|scripting|debugging|troubleshooting|documentation|training|mentoring|coaching|leadership|management|planning|strategy|analysis|evaluation|assessment|review|audit|compliance|governance|risk|security|privacy|data protection|gdpr|sox|hipaa|pci|iso|nist|cobit|itil|togaf|agile|scrum|kanban|waterfall|devops|ci/cd|continuous|integration|deployment|delivery|automation|orchestration|containerization|virtualization|microservices|monolith|distributed|centralized|cloud|on-premise|hybrid|multi-cloud|public|private|community|sovereign|government|enterprise|smb|startup|scale-up|unicorn|decacorn|hectocorn|ipo|m&a|acquisition|merger|divestiture|spin-off|carve-out|joint venture|partnership|alliance|consortium|cooperative|non-profit|foundation|charity|ngo|igo|io|un|wto|imf|world bank|eu|nato|asean|brics|g7|g20|oecd|opec|iea|iaea|who|unesco|unicef|unhcr|wfp|fao|ilo|imo|icao|itu|upu|wipo|wmo|unep|unfccc|cbd|cites|ramsar|world heritage)',
-        ]
-        
-        for pattern in project_patterns:
-            matches = re.findall(pattern, raw_text, re.IGNORECASE)
-            for match in matches:
-                project = match.strip()
-                if len(project) > 5 and not any(word in project.lower() for word in ['university', 'college', 'institute', 'school', 'academy']):
-                    projects.append(project)
-        
-        # Remove duplicates
-        seen = set()
-        unique_projects = []
-        for project in projects:
-            key = project.lower()
-            if key not in seen and len(project) > 3:
-                seen.add(key)
-                unique_projects.append(project)
-        
-        if unique_projects:
-            updated["projects"] = "; ".join(unique_projects[:8])
-    
-    return updated
-
-def fix_name_extraction(raw_text: str, current: Dict[str, Optional[str]]) -> Dict[str, Optional[str]]:
-    """Fix name extraction - look for actual person names."""
-    updated = dict(current)
-    
-    if not updated.get("full_name"):
-        # Look for name patterns in the first 20 lines
-        first_lines = [ln.strip() for ln in raw_text.splitlines()[:20] if ln.strip()]
-        
-        for line in first_lines:
-            # Look for patterns like "FirstName LastName" or "FirstName M. LastName"
-            name_patterns = [
-                r'^([A-Z][a-z]+(?:\s+[A-Z][a-z]+){1,3})$',
-                r'^([A-Z][a-z]+\s+[A-Z]\.\s+[A-Z][a-z]+)$',
-                r'^([A-Z][a-z]+\s+[A-Z][a-z]+\s+[A-Z][a-z]+)$'
-            ]
-            
-            for pattern in name_patterns:
-                match = re.match(pattern, line)
-                if match:
-                    name = match.group(1)
-                    # Filter out job titles and company names
-                    lower_name = name.lower()
-                    if not any(word in lower_name for word in ['engineer', 'developer', 'manager', 'director', 'consultant', 'analyst', 'specialist', 'coordinator', 'assistant', 'officer', 'executive', 'president', 'ceo', 'cto', 'cfo', 'vp', 'head', 'lead', 'senior', 'junior', 'principal', 'staff', 'associate', 'intern', 'trainee', 'apprentice', 'student', 'graduate', 'undergraduate', 'phd', 'masters', 'bachelor', 'diploma', 'certificate', 'degree', 'university', 'college', 'institute', 'school', 'academy', 'corporation', 'company', 'inc', 'ltd', 'llc', 'corp', 'enterprise', 'solutions', 'technologies', 'systems', 'services', 'group', 'team', 'department', 'division', 'unit', 'section', 'branch', 'office', 'location', 'address', 'contact', 'phone', 'email', 'website', 'linkedin', 'github', 'portfolio', 'resume', 'cv', 'profile', 'summary', 'objective', 'experience', 'education', 'skills', 'projects', 'certifications', 'awards', 'publications', 'patents', 'references', 'data', 'software', 'hardware', 'network', 'cloud', 'database', 'web', 'mobile', 'desktop', 'application', 'system', 'platform', 'framework', 'library', 'api', 'sdk', 'tool', 'technology', 'methodology', 'process', 'procedure', 'protocol', 'standard', 'guideline', 'best practice', 'workflow', 'pipeline', 'automation', 'integration', 'deployment', 'maintenance', 'support', 'testing', 'quality', 'security', 'performance', 'scalability', 'reliability', 'availability', 'backup', 'recovery', 'monitoring', 'logging', 'analytics', 'reporting', 'dashboard', 'visualization', 'machine learning', 'artificial intelligence', 'data science', 'statistics', 'mathematics', 'algorithm', 'model', 'prediction', 'classification', 'regression', 'clustering', 'optimization', 'simulation', 'research', 'development', 'design', 'architecture', 'implementation', 'coding', 'programming', 'scripting', 'debugging', 'troubleshooting', 'documentation', 'training', 'mentoring', 'coaching', 'leadership', 'management', 'planning', 'strategy', 'analysis', 'evaluation', 'assessment', 'review', 'audit', 'compliance', 'governance', 'risk', 'security', 'privacy', 'data protection', 'gdpr', 'sox', 'hipaa', 'pci', 'iso', 'nist', 'cobit', 'itil', 'togaf', 'agile', 'scrum', 'kanban', 'waterfall', 'devops', 'ci/cd', 'continuous', 'integration', 'deployment', 'delivery', 'automation', 'orchestration', 'containerization', 'virtualization', 'microservices', 'monolith', 'distributed', 'centralized', 'cloud', 'on-premise', 'hybrid', 'multi-cloud', 'public', 'private', 'community', 'sovereign', 'government', 'enterprise', 'smb', 'startup', 'scale-up', 'unicorn', 'decacorn', 'hectocorn', 'ipo', 'm&a', 'acquisition', 'merger', 'divestiture', 'spin-off', 'carve-out', 'joint venture', 'partnership', 'alliance', 'consortium', 'cooperative', 'non-profit', 'foundation', 'charity', 'ngo', 'igo', 'io', 'un', 'wto', 'imf', 'world bank', 'eu', 'nato', 'asean', 'brics', 'g7', 'g20', 'oecd', 'opec', 'iea', 'iaea', 'who', 'unesco', 'unicef', 'unhcr', 'wfp', 'fao', 'ilo', 'imo', 'icao', 'itu', 'upu', 'wipo', 'wmo', 'unep', 'unfccc', 'cbd', 'cites', 'ramsar', 'world heritage']):
-                        updated["full_name"] = name
-                        return updated
-    
-    return updated
-
-def use_enhanced_parsing_with_fixes(cleaned_text: str, pipe_model, raw_text: str) -> (Dict[str, Optional[str]], str, List[Dict[str, str]]):
-    """
-    Use enhanced parsing functions with additional fixes for specific issues.
-    This function addresses the problems you mentioned.
-    """
-    # Use enhanced LLM parsing
-    merged_fields, llm_output_str, llm_debug = enhanced_chunk_and_parse_with_llm(cleaned_text, pipe_model)
-    
-    # Use enhanced fallback extraction
-    merged_fields = enhanced_fallback_extract_basic_fields(cleaned_text, merged_fields)
-    merged_fields = enhanced_fallback_extract_from_sections(raw_text, merged_fields)
-    
-    # Apply specific fixes for the issues you mentioned
-    merged_fields = fix_name_extraction(raw_text, merged_fields)
-    merged_fields = fix_company_extraction(raw_text, merged_fields)
-    merged_fields = fix_education_extraction(raw_text, merged_fields)
-    merged_fields = fix_project_extraction(raw_text, merged_fields)
-    
-    merged_fields = enforce_source_consistency(raw_text, merged_fields)
-    
-    return merged_fields, llm_output_str, llm_debug
 
 def main():
     input_files = [
@@ -1328,13 +1256,10 @@ def main():
 
     converter = DocumentToJSONConverter()
 
-    pipe = pipeline(
-        "text-generation",
-            model="Qwen/Qwen2.5-1.5B-Instruct",
-    device=-1  # CPU mode - back to what was working fast
-    )
+    # No need to initialize local pipeline anymore - using OpenAI API
+    print("🌐 Using OpenAI API for resume parsing...")
 
-    # use GPU if available, else CPU
+    # Use GPU if available for sentence transformer, else CPU
     scoring_model = SentenceTransformer('all-MiniLM-L6-v2')
 
     job_descriptions = fetch_job_descriptions()
@@ -1355,12 +1280,12 @@ def main():
 
         cleaned = clean_resume_text(result["raw_text"])
 
-        # 1. Get raw LLM output using chunking and merge results
-        merged_fields, llm_output_str, llm_debug = chunk_and_parse_with_llm(cleaned, pipe)
-        print(f"Raw LLM output for file '{filename}':")
+        # 1. Get raw OpenAI output using chunking and merge results
+        merged_fields, llm_output_str, llm_debug = chunk_and_parse_with_openai(cleaned)
+        print(f"Raw OpenAI output for file '{filename}':")
         print(llm_output_str)
 
-        # 1b. Fallback: fill obvious fields from raw text if LLM missed them
+        # 1b. Fallback: fill obvious fields from raw text if OpenAI missed them
         merged_fields = fallback_extract_basic_fields(cleaned, merged_fields)
         # 1c. Fallback from structured sections/regex for remaining fields
         merged_fields = fallback_extract_from_sections(result["raw_text"], merged_fields)
@@ -1371,8 +1296,8 @@ def main():
         llm_data = merged_fields if isinstance(merged_fields, dict) else {}
 
         # 3. Debug prints: show parsed data and keys
-        print(f"Parsed LLM data for '{filename}': {llm_data}")
-        print(f"Parsed keys in LLM output for '{filename}': {list(llm_data.keys())}")
+        print(f"Parsed OpenAI data for '{filename}': {llm_data}")
+        print(f"Parsed keys in OpenAI output for '{filename}': {list(llm_data.keys())}")
 
         # 4. Insert resume metadata + raw output if not exists
         if not collection.find_one({"filename": filename}):
@@ -1441,7 +1366,7 @@ def main():
         stored_doc = graphs_collection.find_one({"filename": filename})
         print("🔍 Stored in MongoDB (graphs_llm) just after upsert:", stored_doc)
 
-        print(f"🗂 Parsed LLM data stored in '{graphs_collection}' collection.")
+        print(f"🗂 Parsed OpenAI data stored in '{graphs_collection}' collection.")
 
         # 7. Score resume against each job description
         for job in job_descriptions:
